@@ -6,7 +6,8 @@
   * 左侧标签页显示反编译源码与伪汇编，右侧显示日志/错误；
   * 反编译在 QThreadPool 线程池异步执行，界面不卡顿；
   * 拖拽区有高亮视觉反馈；底部进度条显示批量进度；
-  * 源码「另存为」按需落盘（预览阶段不写盘）。
+  * 源码「另存为」按需落盘（预览阶段不写盘）；
+  * 系统托盘图标：关闭窗口最小化到托盘，托盘菜单可恢复/退出。
 
 依赖：PyQt6（`pip install PyQt6`）。
 运行：python gui.py
@@ -15,14 +16,24 @@ import os
 import sys
 
 from PyQt6.QtCore import Qt, QThreadPool, QRunnable, QObject, pyqtSignal
-from PyQt6.QtGui import QFont, QAction
+from PyQt6.QtGui import QFont, QAction, QIcon
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QLabel, QFileDialog,
     QVBoxLayout, QHBoxLayout, QSplitter, QTextEdit, QPlainTextEdit,
-    QTabWidget, QProgressBar, QToolBar, QMessageBox,
+    QTabWidget, QProgressBar, QToolBar, QMessageBox, QSystemTrayIcon, QMenu,
 )
 
 from decompiler_api import decompile_text, DecompileOptions, detect_version, is_supported_file
+
+
+def _resource_path(name):
+    """定位随程序分发的资源（图标）。
+
+    源码运行时基准目录是脚本所在目录；PyInstaller 冻结后是解包临时目录
+    (sys._MEIPASS)。两种情况都能取到 app_icon.ico。
+    """
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
 
 
 # --------------------------------------------------------------------------- #
@@ -118,6 +129,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("LuaJIT 反编译工具")
+        self.setWindowIcon(QIcon(_resource_path("app_icon.ico")))
         self.resize(1180, 760)
 
         self.pool = QThreadPool.globalInstance()
@@ -129,9 +141,13 @@ class MainWindow(QMainWindow):
         self.current_name = None
         self.last_input_dir = os.getcwd()
 
+        self._quitting = False          # 经托盘菜单退出时置位
+        self._tray_hint_shown = False   # 关闭到托盘的提示只弹一次
+
         self._build_toolbar()
         self._build_central()
         self._build_statusbar()
+        self._build_tray()
 
     # -- 界面搭建 ---------------------------------------------------------- #
     def _build_toolbar(self):
@@ -221,6 +237,49 @@ class MainWindow(QMainWindow):
         self.progress.setFormat("%v/%m")
         self.statusBar().addPermanentWidget(self.progress)
         self.statusBar().showMessage("就绪")
+
+    def _build_tray(self):
+        icon = QIcon(_resource_path("app_icon.ico"))
+        self.tray = QSystemTrayIcon(icon, self)
+        self.tray.setToolTip("LuaJIT 反编译工具")
+
+        menu = QMenu()
+        show_action = menu.addAction("显示主窗口")
+        show_action.triggered.connect(self._restore_from_tray)
+        menu.addSeparator()
+        quit_action = menu.addAction("退出")
+        quit_action.triggered.connect(self._quit_from_tray)
+        self.tray.setContextMenu(menu)
+
+        self.tray.activated.connect(self._on_tray_activated)
+        self.tray.show()
+
+    # -- 托盘交互 ---------------------------------------------------------- #
+    def _restore_from_tray(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self._restore_from_tray()
+
+    def _quit_from_tray(self):
+        self._quitting = True
+        self.tray.hide()
+        QApplication.quit()
+
+    def closeEvent(self, event):
+        # 点关闭按钮：隐藏到托盘；只有托盘菜单「退出」才真正结束进程
+        if self._quitting:
+            event.accept()
+            return
+        event.ignore()
+        self.hide()
+        if not self._tray_hint_shown:
+            self.tray.showMessage("LuaJIT 反编译工具",
+                                  "已最小化到托盘，双击托盘图标可恢复。")
+            self._tray_hint_shown = True
 
     @staticmethod
     def _titled(title, widget):
@@ -359,6 +418,9 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(_resource_path("app_icon.ico")))
+    # 关闭窗口只是隐藏到托盘，不能因「最后一个窗口关闭」而退出进程
+    app.setQuitOnLastWindowClosed(False)
     window = MainWindow()
     window.show()
     return app.exec()
